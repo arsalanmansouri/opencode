@@ -176,10 +176,10 @@ const layer = Layer.effectDiscard(
                   })
                 }
 
-                const replaced =
-                  input.replaceAll === true
-                    ? source.text.replaceAll(oldString, newString)
-                    : source.text.replace(oldString, newString)
+                // Not String.replace / replaceAll: a string replacement expands `$$`, `$&`, `` $` `` and
+                // `$'`, which silently corrupts replacement text such as shell or template code. Without
+                // replaceAll there is exactly one occurrence here, so this covers both modes.
+                const replaced = source.text.split(oldString).join(newString)
                 const counts = diffLines(source.text, replaced).reduce(
                   (result, item) => ({
                     additions: result.additions + (item.added ? (item.count ?? 0) : 0),

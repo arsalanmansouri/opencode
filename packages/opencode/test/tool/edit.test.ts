@@ -263,6 +263,20 @@ describe("tool.edit", () => {
       }),
     )
 
+    it.instance("inserts replacement text containing $ patterns literally", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "file.sh")
+        yield* put(filepath, "echo PID\necho PID\n")
+
+        yield* run({ filePath: filepath, oldString: "PID", newString: "$$ $& $' $` $1", replaceAll: true })
+        expect(yield* load(filepath)).toBe("echo $$ $& $' $` $1\necho $$ $& $' $` $1\n")
+
+        yield* run({ filePath: filepath, oldString: "echo $$ $& $' $` $1\necho", newString: "echo $$\necho" })
+        expect(yield* load(filepath)).toBe("echo $$\necho $$ $& $' $` $1\n")
+      }),
+    )
+
     it.instance("emits change event for existing files", () =>
       Effect.gen(function* () {
         const test = yield* TestInstance

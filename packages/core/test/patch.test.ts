@@ -54,6 +54,43 @@ describe("Patch", () => {
     ])
   })
 
+  test("treats a bare empty line inside a chunk as a blank context line", () => {
+    const [hunk] = Patch.parse(
+      "*** Begin Patch\n*** Update File: update.txt\n\n@@\n function a() {\n\n-  return 1\n+  return 2\n }\n*** End Patch",
+    )
+    if (hunk?.type !== "update") throw new Error("expected update hunk")
+    expect(hunk.chunks).toEqual([
+      {
+        oldLines: ["function a() {", "", "  return 1", "}"],
+        newLines: ["function a() {", "", "  return 2", "}"],
+        changeContext: undefined,
+        endOfFile: undefined,
+      },
+    ])
+    expect(Patch.derive("update.txt", hunk.chunks, "function a() {\n\n  return 1\n}\n").content).toBe(
+      "function a() {\n\n  return 2\n}\n",
+    )
+  })
+
+  test("appends an addition whose only context is a blank separator line", () => {
+    const [hunk] = Patch.parse("*** Begin Patch\n*** Update File: update.txt\n@@\n+added\n\n*** End Patch")
+    if (hunk?.type !== "update") throw new Error("expected update hunk")
+    expect(Patch.derive("update.txt", hunk.chunks, "first\n").content).toBe("first\nadded\n")
+  })
+
+  test("keeps CRLF line endings on lines written into a CRLF file", () => {
+    const chunks = [{ oldLines: ["one", "two", "three"], newLines: ["one", "TWO", "inserted", "three"] }]
+    expect(Patch.derive("update.txt", chunks, "zero\r\none\r\ntwo\r\nthree\r\nfour\r\n").content).toBe(
+      "zero\r\none\r\nTWO\r\ninserted\r\nthree\r\nfour\r\n",
+    )
+    expect(Patch.derive("update.txt", chunks, "zero\r\none\r\ntwo\r\nthree").content).toBe(
+      "zero\r\none\r\nTWO\r\ninserted\r\nthree\r\n",
+    )
+    expect(Patch.derive("update.txt", chunks, "zero\none\ntwo\nthree\n").content).toBe(
+      "zero\none\nTWO\ninserted\nthree\n",
+    )
+  })
+
   test("rejects malformed hunk bodies", () => {
     expect(() => Patch.parse("*** Begin Patch\n*** Add File: add.txt\nmissing plus\n*** End Patch")).toThrow(
       "Invalid add file line",

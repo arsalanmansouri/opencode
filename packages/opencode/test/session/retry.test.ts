@@ -244,6 +244,34 @@ describe("session.retry.retryable", () => {
     expect(SessionRetry.retryable(error, retryProvider)).toEqual({ message: "Request failed" })
   })
 
+  test("matches standalone status codes in API response bodies", () => {
+    for (const responseBody of ["upstream returned 503", "HTTP 502: bad gateway", '{"status":429}', "error (500)"]) {
+      const error = Schema.decodeUnknownSync(SessionV1.APIError.Schema)(
+        new SessionV1.APIError({ message: "Request failed", isRetryable: false, statusCode: 400, responseBody }).toObject(),
+      )
+      expect(SessionRetry.retryable(error, retryProvider)).toEqual({ message: "Request failed" })
+    }
+  })
+
+  test("does not treat digits inside larger numbers or ids as status codes", () => {
+    for (const message of [
+      "max_tokens: 50000 > 32000, which is the maximum allowed number of output tokens",
+      "Image exceeds 5242880 bytes",
+      "Invalid request req_011CSHoEeqs5C35K429R7Fy",
+      "temperature must be between 0 and 1.500",
+    ]) {
+      const error = Schema.decodeUnknownSync(SessionV1.APIError.Schema)(
+        new SessionV1.APIError({
+          message,
+          isRetryable: false,
+          statusCode: 400,
+          responseBody: JSON.stringify({ error: { message } }),
+        }).toObject(),
+      )
+      expect(SessionRetry.retryable(error, retryProvider)).toBeUndefined()
+    }
+  })
+
   test("retries transport timeout errors", () => {
     const request = MessageV2.fromError(new ProviderError.HeaderTimeoutError(10000), { providerID })
     expect(SessionV1.APIError.isInstance(request)).toBe(true)

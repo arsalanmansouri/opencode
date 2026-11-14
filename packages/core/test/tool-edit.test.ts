@@ -361,6 +361,37 @@ describe("EditTool", () => {
     ),
   )
 
+  it.live("inserts replacement text containing $ patterns literally", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        reset()
+        const target = path.join(tmp.path, "dollar.sh")
+        return Effect.promise(() => fs.writeFile(target, "echo PID\necho PID\nexit CODE\n")).pipe(
+          Effect.andThen(
+            withTool(tmp.path, (registry) =>
+              Effect.gen(function* () {
+                yield* settleTool(
+                  registry,
+                  call({ path: "dollar.sh", oldString: "PID", newString: "$$ $& $' $` $1", replaceAll: true }),
+                )
+                yield* settleTool(registry, call({ path: "dollar.sh", oldString: "CODE", newString: "$$ $&" }))
+              }),
+            ),
+          ),
+          Effect.andThen(() =>
+            Effect.gen(function* () {
+              expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(
+                "echo $$ $& $' $` $1\necho $$ $& $' $` $1\nexit $$ $&\n",
+              )
+            }),
+          ),
+        )
+      },
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   it.live("preserves BOM and CRLF line endings", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),

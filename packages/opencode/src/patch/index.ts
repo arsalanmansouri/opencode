@@ -124,7 +124,10 @@ function parseUpdateFileChunks(lines: string[], startIdx: number): { chunks: Upd
           break
         }
 
-        if (changeLine.startsWith(" ")) {
+        // Models and editors routinely strip the single leading space from a blank context line.
+        // Treat a bare empty line as that blank context line, as the reference apply_patch does,
+        // instead of dropping it and failing to locate the chunk.
+        if (changeLine === "" || changeLine.startsWith(" ")) {
           // Keep line - appears in both old and new
           const content = changeLine.substring(1)
           oldLines.push(content)
@@ -318,11 +321,18 @@ export function deriveNewContentsFromChunks(
     originalLines.pop()
   }
 
+  // Patch lines never carry a carriage return, so lines written into a CRLF file must regain one or
+  // the file ends up with mixed line endings. Untouched lines keep whatever ending they had.
+  const crlf = originalLines.filter((line) => line.endsWith("\r")).length * 2 > originalLines.length
   const replacements = computeReplacements(originalLines, filePath, chunks)
-  let newLines = applyReplacements(originalLines, replacements)
+  let newLines = applyReplacements(
+    originalLines,
+    crlf ? replacements.map(([start, length, lines]) => [start, length, lines.map(withCarriageReturn)]) : replacements,
+  )
 
   // Ensure trailing newline
   if (newLines.length === 0 || newLines[newLines.length - 1] !== "") {
+    if (crlf && newLines.length > 0) newLines[newLines.length - 1] = withCarriageReturn(newLines[newLines.length - 1])
     newLines.push("")
   }
 
@@ -337,6 +347,10 @@ export function deriveNewContentsFromChunks(
     content: newContent,
     bom: originalContent.bom || next.bom,
   }
+}
+
+function withCarriageReturn(line: string) {
+  return line.endsWith("\r") ? line : `${line}\r`
 }
 
 function computeReplacements(
@@ -377,6 +391,10 @@ function computeReplacements(
       pattern = pattern.slice(0, -1)
       if (newSlice.length > 0 && newSlice[newSlice.length - 1] === "") {
         newSlice = newSlice.slice(0, -1)
+      }
+      if (pattern.length === 0) {
+        replacements.push([originalLines.length, 0, newSlice])
+        continue
       }
       found = seekSequence(originalLines, pattern, lineIndex, chunk.is_end_of_file)
     }

@@ -72,10 +72,17 @@ export function derive(path: string, chunks: ReadonlyArray<UpdateFileChunk>, ori
   const source = splitBom(original)
   const lines = source.text.split("\n")
   if (lines.at(-1) === "") lines.pop()
+  // Patch lines never carry a carriage return, so lines written into a CRLF file must regain one or
+  // the file ends up with mixed line endings. Untouched lines keep whatever ending they had.
+  const crlf = lines.filter((line) => line.endsWith("\r")).length * 2 > lines.length
   const replacements = computeReplacements(lines, path, chunks)
   const updated = [...lines]
-  for (const [start, remove, insert] of replacements.toReversed()) updated.splice(start, remove, ...insert)
-  if (updated.at(-1) !== "") updated.push("")
+  for (const [start, remove, insert] of replacements.toReversed())
+    updated.splice(start, remove, ...(crlf ? insert.map(withCarriageReturn) : insert))
+  if (updated.at(-1) !== "") {
+    if (crlf) updated.push(withCarriageReturn(updated.pop()!))
+    updated.push("")
+  }
   const next = splitBom(updated.join("\n"))
   return { content: next.text, bom: source.bom || next.bom }
 }
@@ -100,6 +107,10 @@ function parseUpdate(lines: ReadonlyArray<string>, start: number) {
   const chunks: UpdateFileChunk[] = []
   let index = start
   while (index < lines.length && !lines[index]!.startsWith("***")) {
+    if (lines[index] === "") {
+      index++
+      continue
+    }
     if (!lines[index]!.startsWith("@@")) {
       throw new Error(`Invalid update file line: ${lines[index]}`)
     }
@@ -116,7 +127,9 @@ function parseUpdate(lines: ReadonlyArray<string>, start: number) {
         break
       }
       if (line.startsWith("***")) break
-      if (line.startsWith(" ")) {
+      // Models and editors routinely strip the single leading space from a blank context line.
+      // Treat a bare empty line as that blank context line, as the reference apply_patch does.
+      if (line === "" || line.startsWith(" ")) {
         oldLines.push(line.slice(1))
         newLines.push(line.slice(1))
       } else if (line.startsWith("-")) oldLines.push(line.slice(1))
@@ -148,6 +161,10 @@ function computeReplacements(lines: ReadonlyArray<string>, path: string, chunks:
     if (found === -1 && oldLines.at(-1) === "") {
       oldLines = oldLines.slice(0, -1)
       if (newLines.at(-1) === "") newLines = newLines.slice(0, -1)
+      if (oldLines.length === 0) {
+        replacements.push([lines.length, 0, newLines])
+        continue
+      }
       found = seek(lines, oldLines, lineIndex, chunk.endOfFile)
     }
     if (found === -1) throw new Error(`Failed to find expected lines in ${path}:\n${chunk.oldLines.join("\n")}`)
@@ -191,6 +208,7 @@ const normalize = (value: string) =>
     .replace(/[‐‑‒–—―]/g, "-")
     .replace(/…/g, "...")
     .replace(/ /g, " ")
+const withCarriageReturn = (line: string) => (line.endsWith("\r") ? line : `${line}\r`)
 const splitBom = (text: string) =>
   text.startsWith("\uFEFF") ? { bom: true, text: text.slice(1) } : { bom: false, text }
 const stripHeredoc = (input: string) =>

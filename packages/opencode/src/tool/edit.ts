@@ -712,7 +712,9 @@ export function replace(content: string, oldString: string, newString: string, r
         )
       }
       if (replaceAll) {
-        return content.replaceAll(search, newString)
+        // Not String.replaceAll: a string replacement expands `$$`, `$&`, `` $` `` and `$'`,
+        // which silently corrupts replacement text such as shell or template code.
+        return content.split(search).join(newString)
       }
       const lastIndex = content.lastIndexOf(search)
       if (index !== lastIndex) continue

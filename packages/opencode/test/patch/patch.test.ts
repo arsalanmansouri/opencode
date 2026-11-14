@@ -336,6 +336,52 @@ PATCH`
       }),
     )
 
+    it.live("should treat a bare empty line inside a chunk as blank context", () =>
+      Effect.gen(function* () {
+        const filePath = path.join(tempDir, "blank-context.ts")
+        yield* Effect.promise(() => fs.writeFile(filePath, "function a() {\n\n  return 1\n}\n"))
+
+        const patchText = [
+          "*** Begin Patch",
+          `*** Update File: ${filePath}`,
+          "@@",
+          " function a() {",
+          "",
+          "-  return 1",
+          "+  return 2",
+          " }",
+          "*** End Patch",
+        ].join("\n")
+
+        yield* Patch.applyPatch(patchText)
+        expect(yield* Effect.promise(() => fs.readFile(filePath, "utf-8"))).toBe("function a() {\n\n  return 2\n}\n")
+      }),
+    )
+
+    it.live("should keep CRLF line endings on lines written into a CRLF file", () =>
+      Effect.gen(function* () {
+        const filePath = path.join(tempDir, "crlf.txt")
+        yield* Effect.promise(() => fs.writeFile(filePath, "zero\r\none\r\ntwo\r\nthree\r\nfour\r\n"))
+
+        const patchText = [
+          "*** Begin Patch",
+          `*** Update File: ${filePath}`,
+          "@@",
+          " one",
+          "-two",
+          "+TWO",
+          "+inserted",
+          " three",
+          "*** End Patch",
+        ].join("\n")
+
+        yield* Patch.applyPatch(patchText)
+        expect(yield* Effect.promise(() => fs.readFile(filePath, "utf-8"))).toBe(
+          "zero\r\none\r\nTWO\r\ninserted\r\nthree\r\nfour\r\n",
+        )
+      }),
+    )
+
     it.live("should handle files with no trailing newline", () =>
       Effect.gen(function* () {
         const filePath = path.join(tempDir, "no-newline.txt")
