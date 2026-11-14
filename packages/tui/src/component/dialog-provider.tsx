@@ -15,6 +15,7 @@ import { isConsoleManagedProvider } from "../util/provider-origin"
 import { useConnected } from "./use-connected"
 import { useBindings } from "../keymap"
 import { useClipboard } from "../context/clipboard"
+import { ANTHROPIC_KEYS_URL, checkAnthropicKey } from "../util/anthropic-key"
 
 const PROVIDER_PRIORITY: Record<string, number> = {
   opencode: 0,
@@ -60,7 +61,7 @@ export function providerOptions(list: { id: string; name: string }[]): ProviderO
         providerID: provider.id,
         description: {
           opencode: "(Recommended)",
-          anthropic: "(API key)",
+          anthropic: "(Claude Console API key)",
           openai: "(ChatGPT Plus/Pro or API key)",
           "opencode-go": "Low cost subscription for everyone",
         }[provider.id],
@@ -361,13 +362,42 @@ function ApiMethod(props: ApiMethodProps) {
   const sync = useSync()
   const toast = useToast()
   const { theme } = useTheme()
+  const [checking, setChecking] = createSignal(false)
+  const [error, setError] = createSignal<string>()
+
+  async function checkKey(key: string) {
+    setError(undefined)
+    setChecking(true)
+    const baseURL = sync.data.provider_next.all.find((item) => item.id === "anthropic")?.options.baseURL
+    const result = await checkAnthropicKey({ key, baseURL: typeof baseURL === "string" ? baseURL : undefined })
+    setChecking(false)
+    return result
+  }
 
   return (
     <DialogPrompt
-      title={props.title}
+      title={props.providerID === "anthropic" ? "Connect Claude" : props.title}
       placeholder="API key"
+      busy={checking()}
+      busyText="Checking key with Anthropic…"
       description={() =>
         ({
+          anthropic: (
+            <box gap={1}>
+              <text fg={theme.textMuted}>
+                Use Claude models with an API key from your Claude Console account. Usage is billed to that account.
+              </text>
+              <box>
+                <text fg={theme.text}>Create a key in the Claude Console:</text>
+                <Link href={ANTHROPIC_KEYS_URL} fg={theme.primary} />
+              </box>
+              <text fg={theme.textMuted}>
+                Claude Pro and Max subscriptions can't be used here. Anthropic's terms limit them to Anthropic's own
+                apps.
+              </text>
+              <Show when={error()}>{(message) => <text fg={theme.error}>{message()}</text>}</Show>
+            </box>
+          ),
           opencode: (
             <box gap={1}>
               <text fg={theme.textMuted}>
@@ -392,8 +422,15 @@ function ApiMethod(props: ApiMethodProps) {
           ),
         })[props.providerID] ?? undefined
       }
-      onConfirm={async (value) => {
+      onConfirm={async (input) => {
+        const value = input.trim()
         if (!value) return
+        const check = props.providerID === "anthropic" ? await checkKey(value) : undefined
+        if (check?.type === "invalid") {
+          setError(check.message)
+          return
+        }
+        if (check?.type === "unverified") toast.show({ variant: "warning", message: check.message })
         await sdk.client.auth.set({
           providerID: props.providerID,
           auth: {

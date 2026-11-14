@@ -331,27 +331,25 @@ For custom inference profiles, use the model and provider name in the key and se
 
 ### Anthropic
 
-1. Once you've signed up, run the `/connect` command and select Anthropic.
+Connect your Claude account with an API key from the [Claude Console](https://platform.claude.com/settings/keys). Usage is billed to your Console organization.
+
+1. Create an API key in the [Claude Console](https://platform.claude.com/settings/keys).
+
+2. Run the `/connect` command, select **Anthropic**, and paste the key.
 
    ```txt
    /connect
    ```
 
-2. Here you can select the **Claude Pro/Max** option and it'll open your browser
-   and ask you to authenticate.
-
-   ```txt
-   ┌ Select auth method
-   │
-   │ Manually enter API Key
-   └
-   ```
+   OpenCode checks the key with Anthropic before saving it, so a mistyped or revoked key is reported right away. If you set a custom `baseURL` for the `anthropic` provider, the key is checked against that endpoint instead. If Anthropic can't be reached, the key is saved without the check.
 
 3. Now all the Anthropic models should be available when you use the `/models` command.
 
    ```txt
    /models
    ```
+
+You can also set the `ANTHROPIC_API_KEY` environment variable instead of using `/connect`.
 
 :::info
 There are plugins that allow you to use your Claude Pro/Max models with
