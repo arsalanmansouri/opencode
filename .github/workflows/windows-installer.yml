@@ -1,0 +1,135 @@
+name: windows-installer
+run-name: "windows installer ${{ github.ref_name }}"
+
+# Builds the Windows installer, installs and uninstalls it on a real Windows
+# machine, and publishes it as a GitHub release only if that check passes.
+on:
+  push:
+    branches:
+      - claude/zen-curie-xpynxq
+    paths:
+      - .github/workflows/windows-installer.yml
+      - packages/opencode/script/windows/**
+  workflow_dispatch:
+
+concurrency: windows-installer-${{ github.ref }}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3.6.0
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Install NSIS
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends nsis
+
+      - id: version
+        run: echo "version=$(node -p "require('./packages/opencode/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Build Windows binary
+        working-directory: packages/opencode
+        run: bun run script/build.ts --target=opencode-windows-x64
+        env:
+          OPENCODE_VERSION: ${{ steps.version.outputs.version }}
+          OPENCODE_CHANNEL: latest
+
+      - name: Build installer
+        working-directory: packages/opencode
+        run: bun run script/windows/installer.ts opencode-windows-x64
+        env:
+          OPENCODE_VERSION: ${{ steps.version.outputs.version }}
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-installer
+          path: packages/opencode/dist/OpenCode-Setup-*.exe
+          if-no-files-found: error
+
+  test:
+    needs: build
+    runs-on: windows-2025
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-installer
+
+      - name: Install, run, and uninstall
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = (Get-ChildItem OpenCode-Setup-*.exe).FullName
+          $dir = Join-Path $env:LOCALAPPDATA "Programs\OpenCode"
+          $exe = Join-Path $dir "opencode.exe"
+          $userPath = { (Get-ItemProperty HKCU:\Environment).Path }
+
+          Write-Host "Installing $installer"
+          $process = Start-Process $installer -ArgumentList "/S" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Installer exited with $($process.ExitCode)" }
+          if (-not (Test-Path $exe)) { throw "$exe was not installed" }
+          if (-not (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\OpenCode.lnk")) { throw "Start Menu shortcut missing" }
+          if (-not ((& $userPath) -split ";" -contains $dir)) { throw "$dir is not on the user PATH: $(& $userPath)" }
+          $uninstall = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenCode"
+          if ($uninstall.DisplayVersion -ne $env:VERSION) { throw "Apps & Features lists version $($uninstall.DisplayVersion)" }
+
+          $reported = (& $exe --version | Out-String).Trim()
+          Write-Host "opencode --version: $reported"
+          if ($reported -ne $env:VERSION) { throw "Installed binary reports $reported, expected $env:VERSION" }
+          # A fresh shell reading PATH from the registry finds it by name.
+          $fromPath = (cmd /c "set PATH=$(& $userPath);%PATH% && opencode --version" | Out-String).Trim()
+          if ($fromPath -ne $env:VERSION) { throw "opencode on PATH reports $fromPath" }
+
+          Write-Host "Uninstalling"
+          Start-Process (Join-Path $dir "uninstall.exe") -ArgumentList "/S" -Wait
+          # The uninstaller hands off to a temporary copy of itself, so wait for that to finish.
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Test-Path $exe) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+          if (Test-Path $exe) { throw "Uninstall left $exe behind" }
+          if ((& $userPath) -split ";" -contains $dir) { throw "Uninstall left $dir on PATH" }
+          if (Test-Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenCode") { throw "Uninstall left its Apps & Features entry" }
+          Write-Host "Install, run, and uninstall all passed"
+
+  release:
+    needs: [build, test]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-installer
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          TAG: v${{ needs.build.outputs.version }}-windows.${{ github.run_number }}
+        run: |
+          cat > notes.md <<EOF
+          Windows installer for OpenCode ${VERSION}, built from \`${GITHUB_SHA::7}\` on \`${GITHUB_REF_NAME}\`.
+
+          ### Install
+
+          1. Download **$(ls OpenCode-Setup-*.exe)** below and run it.
+          2. The installer is not code-signed, so Windows SmartScreen may say "Windows protected your PC". Click **More info**, then **Run anyway**.
+          3. Follow the wizard. No administrator rights are needed: OpenCode installs for your user account only.
+          4. Start **OpenCode** from the Start Menu or Desktop, or type \`opencode\` in a new terminal inside a project folder.
+          5. Run \`/connect\` inside OpenCode to sign in to a model provider. For Claude models, choose **Anthropic** and paste an API key from https://platform.claude.com/settings/keys.
+
+          ### Uninstall
+
+          Settings > Apps > Installed apps > OpenCode > Uninstall. Your sessions and saved credentials are kept.
+
+          This build was installed, run, and uninstalled on a Windows Server 2025 runner before publishing.
+          EOF
+          gh release create "$TAG" OpenCode-Setup-*.exe \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "OpenCode ${VERSION} for Windows (build ${GITHUB_RUN_NUMBER})" \
+            --notes-file notes.md
