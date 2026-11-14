@@ -9,6 +9,8 @@ export class AppProcessError extends Schema.TaggedErrorClass<AppProcessError>()(
   command: Schema.String,
   exitCode: Schema.optional(Schema.Number),
   stderr: Schema.optional(Schema.String),
+  /** What the command had written when a timeout stopped it: combined output, or stdout when not combined. */
+  output: Schema.optional(Schema.String),
   cause: Schema.optional(Schema.Defect()),
 }) {
   override get message() {
@@ -118,10 +120,17 @@ const normalizeStdin = (
       ? Stream.make(input)
       : input
 
-export const collectStream = (stream: Stream.Stream<Uint8Array, PlatformError>, maxOutputBytes: number | undefined) =>
+const makeCapture = () => ({ chunks: [] as Uint8Array[], bytes: 0, truncated: false })
+
+/** Pass `capture` to keep what was collected readable even if the collection is interrupted. */
+export const collectStream = (
+  stream: Stream.Stream<Uint8Array, PlatformError>,
+  maxOutputBytes: number | undefined,
+  capture = makeCapture(),
+) =>
   Stream.runFold(
     stream,
-    () => ({ chunks: [] as Uint8Array[], bytes: 0, truncated: false }),
+    () => capture,
     (acc, chunk) => {
       if (maxOutputBytes === undefined) {
         acc.chunks.push(chunk)
@@ -143,12 +152,14 @@ const layer = Layer.effect(
 
     const runCommand = (command: ChildProcess.Command, options?: RunOptions) => {
       const description = describeCommand(command)
+      // Held outside the collection so a timeout can still report what the command wrote.
+      const capture = makeCapture()
       const collect = Effect.scoped(
         Effect.gen(function* () {
           const handle = yield* spawner.spawn(command)
           if (options?.combineOutput) {
             const [output, exitCode] = yield* Effect.all(
-              [collectStream(handle.all, options.maxOutputBytes), handle.exitCode],
+              [collectStream(handle.all, options.maxOutputBytes, capture), handle.exitCode],
               { concurrency: "unbounded" },
             )
             return {
@@ -164,7 +175,7 @@ const layer = Layer.effect(
           }
           const [stdout, stderr, exitCode] = yield* Effect.all(
             [
-              collectStream(handle.stdout, options?.maxOutputBytes),
+              collectStream(handle.stdout, options?.maxOutputBytes, capture),
               collectStream(handle.stderr, options?.maxErrorBytes),
               handle.exitCode,
             ],
@@ -183,7 +194,14 @@ const layer = Layer.effect(
       const timed = options?.timeout
         ? Effect.timeoutOrElse(collect, {
             duration: options.timeout,
-            orElse: () => Effect.fail(new AppProcessError({ command: description, cause: new Error("Timed out") })),
+            orElse: () =>
+              Effect.fail(
+                new AppProcessError({
+                  command: description,
+                  cause: new Error("Timed out"),
+                  ...(capture.bytes > 0 ? { output: Buffer.concat(capture.chunks).toString("utf8") } : {}),
+                }),
+              ),
           })
         : collect
       const aborted = options?.signal

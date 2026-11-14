@@ -416,6 +416,31 @@ describe("BashTool", () => {
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
   )
+  it.live("keeps the output written before a timeout", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        reset()
+        runFailure = new AppProcess.AppProcessError({
+          command: "test",
+          cause: new Error("Timed out"),
+          output: "running suite 3 of 9\n",
+        })
+        return withTool(tmp.path, (registry) => settleTool(registry, call({ command: "test", timeout: 10 }))).pipe(
+          Effect.andThen((settled) =>
+            Effect.sync(() => {
+              expect(settled.output?.content[0]).toMatchObject({
+                type: "text",
+                text: "running suite 3 of 9\n\n\nCommand exceeded timeout of 10 ms. Retry with a larger timeout if the command is expected to take longer.",
+              })
+              expect(settled.output?.structured).toMatchObject({ timeout: true })
+            }),
+          ),
+        )
+      },
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
 })
 
 test("keeps locked deferred parity TODOs visible", async () => {

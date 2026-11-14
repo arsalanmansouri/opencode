@@ -171,12 +171,15 @@ const layer = Layer.effectDiscard(
                 })
                 .pipe(
                   Effect.catchTag("AppProcessError", (error) =>
-                    isTimeout(error) ? Effect.succeed(undefined) : Effect.fail(error),
+                    isTimeout(error) ? Effect.succeed(error) : Effect.fail(error),
                   ),
                 )
-              if (!result) {
+              if (result instanceof AppProcess.AppProcessError) {
+                // Keep what the command wrote before it was stopped. Where it got stuck is usually
+                // the only way to tell why it timed out.
+                const notice = `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`
                 return {
-                  output: `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`,
+                  output: result.output ? `${result.output}\n\n${notice}` : notice,
                   truncated: false,
                   timeout: true,
                   ...(warnings.length ? { warnings } : {}),

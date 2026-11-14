@@ -3,7 +3,7 @@ import fs from "fs/promises"
 import { realpathSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { Effect, Exit, Fiber, Stream } from "effect"
+import { Cause, Effect, Exit, Fiber, Stream } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { AppProcess } from "@opencode-ai/core/process"
@@ -170,6 +170,22 @@ describe("AppProcess", () => {
           },
           (directory) => Effect.promise(() => fs.rm(directory, { recursive: true, force: true })),
         ),
+        5_000,
+      )
+
+      it.live(
+        "timeout reports what the command wrote before it was stopped",
+        Effect.gen(function* () {
+          const svc = yield* AppProcess.Service
+          const script = "process.stdout.write('started step 3\\n');setInterval(()=>{},60000)"
+          for (const combineOutput of [true, false]) {
+            const exit = yield* Effect.exit(svc.run(cmd("-e", script), { timeout: "500 millis", combineOutput }))
+            if (!Exit.isFailure(exit)) throw new Error("expected the command to time out")
+            const error = Cause.squash(exit.cause)
+            expect(error).toBeInstanceOf(AppProcess.AppProcessError)
+            expect((error as AppProcess.AppProcessError).output).toBe("started step 3\n")
+          }
+        }),
         5_000,
       )
 
