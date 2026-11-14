@@ -1131,6 +1131,75 @@ describe("tool.shell abort", () => {
   )
 })
 
+describe("tool.shell progress", () => {
+  it.live("returns the end of the output of a command that exits right after writing it", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        // seq writes with blocking I/O. A bun child drops its own writes once the socket it gets
+        // as stdout fills up, so it cannot stand in as a high-volume producer here.
+        if (process.platform === "win32") return
+        // The reader used to be interrupted as soon as the process closed, dropping whatever it
+        // had not consumed yet. That lost the final lines in most runs of a command this size.
+        for (const _ of Array.from({ length: 5 })) {
+          const result = yield* run({ command: "seq 1 60000" })
+          expect(result.output.trimEnd().endsWith("\n60000")).toBe(true)
+        }
+      }),
+    ),
+  )
+
+  it.live("coalesces progress updates from a chatty command", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        if (process.platform === "win32") return
+        const updates: string[] = []
+        const start = performance.now()
+        const result = yield* run(
+          { command: "seq 1 60000" },
+          {
+            ...ctx,
+            metadata: (input) =>
+              Effect.sync(() => {
+                const output = (input.metadata as { output?: string })?.output
+                if (output) updates.push(output)
+              }),
+          },
+        )
+        expect(result.metadata.exit).toBe(0)
+        expect(updates.length).toBeGreaterThan(0)
+        // Updates are spaced at least 100ms apart however many chunks the command writes, plus
+        // one final update when the command ends.
+        expect(updates.length).toBeLessThanOrEqual(Math.floor((performance.now() - start) / 100) + 2)
+        expect(updates.at(-1)?.trimEnd().endsWith("\n60000")).toBe(true)
+      }),
+    ),
+  )
+
+  it.live("publishes the latest output once a command goes quiet", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        if (process.platform === "win32") return
+        const updates: string[] = []
+        yield* run(
+          { command: `echo first; echo second; sleep 0.6; echo third` },
+          {
+            ...ctx,
+            metadata: (input) =>
+              Effect.sync(() => {
+                const output = (input.metadata as { output?: string })?.output
+                if (output) updates.push(output)
+              }),
+          },
+        )
+        expect(updates.some((output) => output.includes("second") && !output.includes("third"))).toBe(true)
+      }),
+    ),
+  )
+})
+
 describe("tool.shell truncation", () => {
   it.live("truncates output exceeding line limit", () =>
     runIn(

@@ -1707,6 +1707,39 @@ unixNoLLMServer(
 )
 
 unixNoLLMServer(
+  "shell coalesces part updates from a chatty command and keeps the complete output",
+  () =>
+    withSh(() =>
+      Effect.gen(function* () {
+        const { prompt, chat } = yield* boot()
+        const events = yield* EventV2Bridge.Service
+        const updates = { count: 0 }
+        const off = yield* events.listen((event) => {
+          if (event.type === MessageV2.Event.PartUpdated.type) updates.count += 1
+          return Effect.void
+        })
+        const start = performance.now()
+        // One write per line: each used to persist the whole output so far.
+        const result = yield* prompt.shell({
+          sessionID: chat.id,
+          agent: "build",
+          command: "i=1; while [ $i -le 3000 ]; do echo line-$i; i=$((i+1)); done",
+        })
+        yield* off
+
+        const tool = completedTool(result.parts)
+        if (!tool) return
+        expect(tool.state.output.trimEnd().split("\n")).toHaveLength(3000)
+        expect(tool.state.output.trimEnd().endsWith("line-3000")).toBe(true)
+        // The running part, at most one update per 100ms, and the completed part.
+        expect(updates.count).toBeLessThanOrEqual(Math.floor((performance.now() - start) / 100) + 3)
+      }),
+    ),
+  { config: cfg },
+  30_000,
+)
+
+unixNoLLMServer(
   "shell updates running metadata before process exit",
   () =>
     withSh(() =>

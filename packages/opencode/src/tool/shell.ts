@@ -1,4 +1,4 @@
-import { Effect, Stream } from "effect"
+import { Effect, Fiber, Stream } from "effect"
 import os from "os"
 import { createWriteStream } from "node:fs"
 import * as Tool from "./tool"
@@ -12,6 +12,7 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
 import { fileURLToPath } from "url"
 import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Coalesce } from "@/effect/coalesce"
 import { Shell } from "@opencode-ai/core/shell"
 import { ShellID } from "./shell/id"
 
@@ -25,6 +26,8 @@ import { BashArity } from "@/permission/arity"
 export { Parameters } from "./shell/prompt"
 
 const MAX_METADATA_LENGTH = 30_000
+const PROGRESS_INTERVAL = "100 millis"
+const DRAIN_TIMEOUT = "2 seconds"
 const CWD = new Set(["cd", "chdir", "popd", "pushd", "push-location", "set-location"])
 const FILES = new Set([
   ...CWD,
@@ -438,7 +441,9 @@ export const ShellTool = Tool.define(
       const limits = yield* trunc.limits()
       const keep = limits.maxBytes * 2
       let full = ""
+      let fullBytes = 0
       let last = ""
+      let sent = ""
       const list: Chunk[] = []
       let used = 0
       let file = ""
@@ -483,7 +488,23 @@ export const ShellTool = Tool.define(
           yield* Effect.addFinalizer(closeSink)
           const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
 
-          yield* Effect.forkScoped(
+          // Every progress update persists the part and fans out to each client, so a chatty
+          // command must not publish one per chunk.
+          const progress = yield* Coalesce.make(
+            Effect.suspend(() => {
+              const output = last
+              return ctx.metadata({ metadata: { output } }).pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    sent = output
+                  }),
+                ),
+              )
+            }),
+            PROGRESS_INTERVAL,
+          )
+
+          const reader = yield* Effect.forkScoped(
             Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
               const size = Buffer.byteLength(chunk, "utf-8")
               list.push({ text: chunk, size })
@@ -496,37 +517,25 @@ export const ShellTool = Tool.define(
               }
 
               last = preview(last + chunk)
+              progress.notify()
 
               if (file) {
                 sink?.write(chunk)
-              } else {
-                full += chunk
-                if (Buffer.byteLength(full, "utf-8") > limits.maxBytes) {
-                  return trunc.write(full).pipe(
-                    Effect.andThen((next) =>
-                      Effect.sync(() => {
-                        file = next
-                        cut = true
-                        sink = createWriteStream(next, { flags: "a" })
-                        full = ""
-                      }),
-                    ),
-                    Effect.andThen(
-                      ctx.metadata({
-                        metadata: {
-                          output: last,
-                        },
-                      }),
-                    ),
-                  )
-                }
+                return Effect.void
               }
-
-              return ctx.metadata({
-                metadata: {
-                  output: last,
-                },
-              })
+              full += chunk
+              fullBytes += size
+              if (fullBytes <= limits.maxBytes) return Effect.void
+              return trunc.write(full).pipe(
+                Effect.andThen((next) =>
+                  Effect.sync(() => {
+                    file = next
+                    cut = true
+                    sink = createWriteStream(next, { flags: "a" })
+                    full = ""
+                  }),
+                ),
+              )
             }),
           )
 
@@ -553,6 +562,16 @@ export const ShellTool = Tool.define(
             expired = true
             yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.orDie)
           }
+
+          // The process closing only means its output has been delivered to the stream, not that
+          // the reader has consumed it. Let the reader finish instead of interrupting it at scope
+          // close, or the end of the output, usually the part that matters, is silently lost.
+          // Bounded because a killed process tree is not guaranteed to release its pipes.
+          yield* Fiber.join(reader).pipe(Effect.ignore, Effect.timeoutOption(DRAIN_TIMEOUT))
+
+          // Stop the publisher before the last update so the two never write concurrently.
+          yield* progress.stop
+          if (sent !== last) yield* ctx.metadata({ metadata: { output: last } })
 
           return exit.kind === "exit" ? exit.code : null
         }),

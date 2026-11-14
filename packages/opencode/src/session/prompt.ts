@@ -47,6 +47,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { TaskTool, type TaskPromptOps } from "@/tool/task"
 import { SessionRunState } from "./run-state"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Coalesce } from "@/effect/coalesce"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -564,15 +565,24 @@ const layer = Layer.effect(
                 forceKillAfter: "3 seconds",
               })
               const handle = yield* spawner.spawn(cmd)
+              // Each update persists the whole output so far. Publishing one per chunk made the
+              // work quadratic in the output size for a chatty command.
+              const progress = yield* Coalesce.make(
+                Effect.suspend(() => {
+                  if (part.state.status !== "running") return Effect.void
+                  part.state.metadata = { output }
+                  return sessions.updatePart(part)
+                }),
+                "100 millis",
+              )
               yield* Stream.runForEach(Stream.decodeText(handle.all), (chunk) =>
-                Effect.gen(function* () {
+                Effect.sync(() => {
                   output += chunk
-                  if (part.state.status === "running") {
-                    part.state.metadata = { output }
-                    yield* sessions.updatePart(part)
-                  }
+                  progress.notify()
                 }),
               )
+              // finish writes the complete output next and must not race an in-flight update.
+              yield* progress.stop
               yield* handle.exitCode
             }).pipe(Effect.scoped, Effect.orDie),
           ).pipe(Effect.exit)
