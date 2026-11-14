@@ -10,6 +10,7 @@ on:
     paths:
       - .github/workflows/windows-installer.yml
       - packages/opencode/script/windows/**
+      - install.ps1
   workflow_dispatch:
 
 concurrency: windows-installer-${{ github.ref }}
@@ -114,7 +115,15 @@ jobs:
           cat > notes.md <<EOF
           Windows installer for OpenCode ${VERSION}, built from \`${GITHUB_SHA::7}\` on \`${GITHUB_REF_NAME}\`.
 
-          ### Install
+          ### Install from PowerShell
+
+          \`\`\`powershell
+          irm https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/refs/heads/${GITHUB_REF_NAME}/install.ps1 | iex
+          \`\`\`
+
+          This downloads the newest installer below, checks its SHA-256, and installs it for your user account.
+
+          ### Install by hand
 
           1. Download **$(ls OpenCode-Setup-*.exe)** below and run it.
           2. The installer is not code-signed, so Windows SmartScreen may say "Windows protected your PC". Click **More info**, then **Run anyway**.
@@ -133,3 +142,22 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "OpenCode ${VERSION} for Windows (build ${GITHUB_RUN_NUMBER})" \
             --notes-file notes.md
+
+  # The one-line PowerShell install against the release just published, in the
+  # Windows PowerShell 5.1 that ships with Windows, on a machine that never saw it.
+  downloader:
+    needs: [build, release]
+    runs-on: windows-2025
+    steps:
+      - name: Install with the PowerShell one-liner
+        shell: powershell
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          OPENCODE_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "PowerShell $($PSVersionTable.PSVersion)"
+          irm "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/$env:GITHUB_SHA/install.ps1" | iex
+          $reported = (opencode --version | Out-String).Trim()
+          if ($reported -ne $env:VERSION) { throw "opencode --version reports $reported, expected $env:VERSION" }
+          Write-Host "The one-liner installed OpenCode $reported"
