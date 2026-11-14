@@ -137,7 +137,7 @@ export const ReadTool = Tool.define<
     const lines = Effect.fn("ReadTool.lines")(function* (filepath: string, opts: { limit: number; offset: number }) {
       const start = opts.offset - 1
       const raw: string[] = []
-      const flags = { bytes: 0, count: 0, cut: false, more: false, done: false }
+      const flags = { bytes: 0, count: 0, cut: false, more: false }
 
       // Note: prefer manual TextDecoder over Stream.decodeText — when the source stream
       // ends without flushing, decodeText drops the final unterminated line. We also
@@ -148,15 +148,16 @@ export const ReadTool = Tool.define<
       yield* fs.stream(filepath).pipe(
         Stream.map((bytes) => decoder.decode(bytes, { stream: true })),
         Stream.splitLines,
-        Stream.runForEach((text) =>
-          Effect.gen(function* () {
-            if (flags.done) return yield* new ReadStop()
+        // One synchronous pass per chunk of lines. Running an effect per line made paging to
+        // the end of a large log take seconds.
+        Stream.runForEachArray((lines) => {
+          for (const text of lines) {
             flags.count += 1
-            if (flags.count <= start) return
+            if (flags.count <= start) continue
 
             if (raw.length >= opts.limit) {
               flags.more = true
-              return
+              continue
             }
 
             const line = text.length > MAX_LINE_LENGTH ? text.substring(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : text
@@ -164,15 +165,15 @@ export const ReadTool = Tool.define<
             if (flags.bytes + size <= MAX_BYTES) {
               raw.push(line)
               flags.bytes += size
-              return
+              continue
             }
 
             flags.cut = true
             flags.more = true
-            flags.done = true
-            return yield* new ReadStop()
-          }),
-        ),
+            return Effect.fail(new ReadStop())
+          }
+          return Effect.void
+        }),
         Effect.catchTag("ReadStop", () => Effect.void),
       )
 

@@ -1,9 +1,16 @@
-import { afterEach, describe, expect } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 import path from "path"
 import fs from "fs/promises"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
-import { EditTool } from "../../src/tool/edit"
+import {
+  ContextAwareReplacer,
+  EditTool,
+  EscapeNormalizedReplacer,
+  TrimmedBoundaryReplacer,
+  WhitespaceNormalizedReplacer,
+  replace,
+} from "../../src/tool/edit"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { LSP } from "@/lsp/lsp"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -584,5 +591,40 @@ describe("tool.edit", () => {
         expect(yield* load(filepath)).toBe("top = 1\nmiddle = keep\nbottom = 2\n")
       }),
     )
+  })
+})
+
+describe("tool.edit fallback matching", () => {
+  test("matches a whitespace-normalized block that starts with a blank line", () => {
+    const content = ["keep", "", "  x  =  1", "  return   x", "keep"].join("\n")
+    expect([...WhitespaceNormalizedReplacer(content, "\nx = 1\nreturn x")]).toEqual(["\n  x  =  1\n  return   x"])
+  })
+
+  test("matches a trimmed block that starts with a blank line", () => {
+    const content = ["keep", "   ", "  value = 1", "   ", "keep"].join("\n")
+    expect([...TrimmedBoundaryReplacer(content, "\nvalue = 1\n")]).toEqual(["value = 1", "   \n  value = 1\n   "])
+  })
+
+  test("matches an escaped block only where the content carries the escapes", () => {
+    const content = ['log("a\\tb")', "plain", 'log("a\tb")'].join("\n")
+    expect([...EscapeNormalizedReplacer(content, 'log("a\\tb")')]).toEqual(['log("a\tb")', 'log("a\\tb")', 'log("a\tb")'])
+  })
+
+  test("uses the first closing anchor after each opening anchor", () => {
+    const content = ["if (a) {", "  one()", "}", "if (a) {", "  two()", "  extra()", "}", "}"].join("\n")
+    expect([...ContextAwareReplacer(content, ["if (a) {", "  one()", "}"].join("\n"))]).toEqual(["if (a) {\n  one()\n}"])
+    expect([...ContextAwareReplacer(content, ["if (a) {", "  two()", "  other()", "}"].join("\n"))]).toEqual([
+      "if (a) {\n  two()\n  extra()\n}",
+    ])
+  })
+
+  test("rejects a stale block quickly when its first line is common and its last line is gone", () => {
+    // Scanning forward from every occurrence of the first line used to take seconds here, with
+    // the event loop blocked for the duration.
+    const content = Array.from({ length: 20_000 }, (_, index) => (index % 2 ? "  }" : `  call(${index})`)).join("\n")
+    const stale = ["}", "  stale line one", "  stale line two", "  stale line three", "NEVER_PRESENT"].join("\n")
+    const start = performance.now()
+    expect(() => replace(content, stale, "x")).toThrow("Could not find oldString")
+    expect(performance.now() - start).toBeLessThan(2_000)
   })
 })

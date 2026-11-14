@@ -228,17 +228,38 @@ function levenshtein(a: string, b: string): number {
   if (a === "" || b === "") {
     return Math.max(a.length, b.length)
   }
-  const matrix = Array.from({ length: a.length + 1 }, (_, i) =>
-    Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)),
-  )
+  // Two rolling rows instead of the full matrix: same distances, O(b) memory.
+  let previous = Array.from({ length: b.length + 1 }, (_, j) => j)
+  let current = new Array<number>(b.length + 1)
 
   for (let i = 1; i <= a.length; i++) {
+    current[0] = i
     for (let j = 1; j <= b.length; j++) {
       const cost = a[i - 1] === b[j - 1] ? 0 : 1
-      matrix[i][j] = Math.min(matrix[i - 1][j] + 1, matrix[i][j - 1] + 1, matrix[i - 1][j - 1] + cost)
+      current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost)
     }
+    ;[previous, current] = [current, previous]
   }
-  return matrix[a.length][b.length]
+  return previous[b.length]
+}
+
+/**
+ * The fallback replacers below slide a window over every line of the file. They run when the
+ * model's oldString is stale, often repeatedly, and they run synchronously, so each one rejects
+ * a position with a cheap necessary condition before doing the per-window work. The conditions
+ * are exact: they only skip positions the full comparison would also reject.
+ */
+
+// First index at or after `from` in ascending `positions`, or -1.
+function firstAtOrAfter(positions: number[], from: number) {
+  let low = 0
+  let high = positions.length
+  while (low < high) {
+    const mid = (low + high) >> 1
+    if (positions[mid] < from) low = mid + 1
+    else high = mid
+  }
+  return low < positions.length ? positions[low] : -1
 }
 
 export const SimpleReplacer: Replacer = function* (_content, find) {
@@ -253,14 +274,14 @@ export const LineTrimmedReplacer: Replacer = function* (content, find) {
     searchLines.pop()
   }
 
+  const originalTrimmed = originalLines.map((line) => line.trim())
+  const searchTrimmed = searchLines.map((line) => line.trim())
+
   for (let i = 0; i <= originalLines.length - searchLines.length; i++) {
     let matches = true
 
     for (let j = 0; j < searchLines.length; j++) {
-      const originalTrimmed = originalLines[i + j].trim()
-      const searchTrimmed = searchLines[j].trim()
-
-      if (originalTrimmed !== searchTrimmed) {
+      if (originalTrimmed[i + j] !== searchTrimmed[j]) {
         matches = false
         break
       }
@@ -304,20 +325,20 @@ export const BlockAnchorReplacer: Replacer = function* (content, find) {
 
   // Collect all candidate positions where both anchors match
   const candidates: Array<{ startLine: number; endLine: number }> = []
+  const originalTrimmed = originalLines.map((line) => line.trim())
+  const lastLinePositions = originalTrimmed.flatMap((line, index) => (line === lastLineSearch ? [index] : []))
   for (let i = 0; i < originalLines.length; i++) {
-    if (originalLines[i].trim() !== firstLineSearch) {
+    if (originalTrimmed[i] !== firstLineSearch) {
       continue
     }
 
-    // Look for the matching last line after this first line
-    for (let j = i + 2; j < originalLines.length; j++) {
-      if (originalLines[j].trim() === lastLineSearch) {
-        const actualBlockSize = j - i + 1
-        if (Math.abs(actualBlockSize - searchBlockSize) <= maxLineDelta) {
-          candidates.push({ startLine: i, endLine: j })
-        }
-        break // Only match the first occurrence of the last line
-      }
+    // Only the first occurrence of the last line after this first line counts. Looking it up
+    // instead of scanning forward keeps a common first line from making this quadratic.
+    const j = firstAtOrAfter(lastLinePositions, i + 2)
+    if (j === -1) continue
+    const actualBlockSize = j - i + 1
+    if (Math.abs(actualBlockSize - searchBlockSize) <= maxLineDelta) {
+      candidates.push({ startLine: i, endLine: j })
     }
   }
 
@@ -430,13 +451,14 @@ export const WhitespaceNormalizedReplacer: Replacer = function* (content, find) 
 
   // Handle single line matches
   const lines = content.split("\n")
+  const normalizedLines = lines.map(normalizeWhitespace)
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
-    if (normalizeWhitespace(line) === normalizedFind) {
+    if (normalizedLines[i] === normalizedFind) {
       yield line
     } else {
       // Only check for substring matches if the full line doesn't match
-      const normalizedLine = normalizeWhitespace(line)
+      const normalizedLine = normalizedLines[i]
       if (normalizedLine.includes(normalizedFind)) {
         // Find the actual substring in the original line that matches
         const words = find.trim().split(/\s+/)
@@ -460,6 +482,8 @@ export const WhitespaceNormalizedReplacer: Replacer = function* (content, find) 
   const findLines = find.split("\n")
   if (findLines.length > 1) {
     for (let i = 0; i <= lines.length - findLines.length; i++) {
+      // A normalized block starts with its first non-blank normalized line.
+      if (normalizedLines[i] && !normalizedFind.startsWith(normalizedLines[i])) continue
       const block = lines.slice(i, i + findLines.length)
       if (normalizeWhitespace(block.join("\n")) === normalizedFind) {
         yield block.join("\n")
@@ -487,8 +511,11 @@ export const IndentationFlexibleReplacer: Replacer = function* (content, find) {
   const normalizedFind = removeIndentation(find)
   const contentLines = content.split("\n")
   const findLines = find.split("\n")
+  const firstFindLine = findLines[0].trim()
 
   for (let i = 0; i <= contentLines.length - findLines.length; i++) {
+    // Removing indentation never changes what a line trims to.
+    if (contentLines[i].trim() !== firstFindLine) continue
     const block = contentLines.slice(i, i + findLines.length).join("\n")
     if (removeIndentation(block) === normalizedFind) {
       yield block
@@ -534,8 +561,13 @@ export const EscapeNormalizedReplacer: Replacer = function* (content, find) {
   // Also try finding escaped versions in content that match unescaped find
   const lines = content.split("\n")
   const findLines = unescapedFind.split("\n")
+  // escaped[i] counts the lines before i that contain a backslash.
+  const escaped = [0]
+  for (const line of lines) escaped.push(escaped[escaped.length - 1] + (line.includes("\\") ? 1 : 0))
 
   for (let i = 0; i <= lines.length - findLines.length; i++) {
+    // Unescaping leaves a block without backslashes unchanged, so it can only match verbatim.
+    if (escaped[i + findLines.length] === escaped[i] && lines[i] !== findLines[0]) continue
     const block = lines.slice(i, i + findLines.length).join("\n")
     const unescapedBlock = unescapeString(block)
 
@@ -577,6 +609,9 @@ export const TrimmedBoundaryReplacer: Replacer = function* (content, find) {
   const findLines = find.split("\n")
 
   for (let i = 0; i <= lines.length - findLines.length; i++) {
+    // A trimmed block starts with its first line trimmed, unless that line is blank.
+    const head = lines[i].trim()
+    if (head && !trimmedFind.startsWith(head)) continue
     const block = lines.slice(i, i + findLines.length).join("\n")
 
     if (block.trim() === trimmedFind) {
@@ -604,41 +639,34 @@ export const ContextAwareReplacer: Replacer = function* (content, find) {
   const lastLine = findLines[findLines.length - 1].trim()
 
   // Find blocks that start and end with the context anchors
+  const contentTrimmed = contentLines.map((line) => line.trim())
+  const lastLinePositions = contentTrimmed.flatMap((line, index) => (line === lastLine ? [index] : []))
   for (let i = 0; i < contentLines.length; i++) {
-    if (contentLines[i].trim() !== firstLine) continue
+    if (contentTrimmed[i] !== firstLine) continue
 
-    // Look for the matching last line
-    for (let j = i + 2; j < contentLines.length; j++) {
-      if (contentLines[j].trim() === lastLine) {
-        // Found a potential context block
-        const blockLines = contentLines.slice(i, j + 1)
-        const block = blockLines.join("\n")
+    // Only the first occurrence of the last line after this first line counts.
+    const j = firstAtOrAfter(lastLinePositions, i + 2)
+    if (j === -1 || j - i + 1 !== findLines.length) continue
 
-        // Check if the middle content has reasonable similarity
-        // (simple heuristic: at least 50% of non-empty lines should match when trimmed)
-        if (blockLines.length === findLines.length) {
-          let matchingLines = 0
-          let totalNonEmptyLines = 0
+    // Check if the middle content has reasonable similarity
+    // (simple heuristic: at least 50% of non-empty lines should match when trimmed)
+    let matchingLines = 0
+    let totalNonEmptyLines = 0
 
-          for (let k = 1; k < blockLines.length - 1; k++) {
-            const blockLine = blockLines[k].trim()
-            const findLine = findLines[k].trim()
+    for (let k = 1; k < findLines.length - 1; k++) {
+      const blockLine = contentTrimmed[i + k]
+      const findLine = findLines[k].trim()
 
-            if (blockLine.length > 0 || findLine.length > 0) {
-              totalNonEmptyLines++
-              if (blockLine === findLine) {
-                matchingLines++
-              }
-            }
-          }
-
-          if (totalNonEmptyLines === 0 || matchingLines / totalNonEmptyLines >= 0.5) {
-            yield block
-            break // Only match the first occurrence
-          }
+      if (blockLine.length > 0 || findLine.length > 0) {
+        totalNonEmptyLines++
+        if (blockLine === findLine) {
+          matchingLines++
         }
-        break
       }
+    }
+
+    if (totalNonEmptyLines === 0 || matchingLines / totalNonEmptyLines >= 0.5) {
+      yield contentLines.slice(i, j + 1).join("\n")
     }
   }
 }
